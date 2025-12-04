@@ -1,18 +1,24 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI, Type } from "@google/genai";
 
 const getAIClient = () => {
-  const metaEnv = (import.meta as any).env || {};
-  // Prioritize environment variables, but fall back to the provided key if missing
-  const apiKey = metaEnv.VITE_API_KEY || metaEnv.VITE_GEMINI_API_KEY || (typeof process !== 'undefined' ? process.env.API_KEY : undefined) || "AIzaSyDrK28IHOxcee3vpwD9kgW9ygS6L3HjuR8";
+  let apiKey = "";
+  try {
+    // Safely check if process is defined (Node.js/Build env) before accessing env
+    if (typeof process !== 'undefined' && process.env) {
+      apiKey = process.env.API_KEY || "";
+    }
+  } catch (e) {
+    console.warn("Environment variable access failed.");
+  }
   
   if (!apiKey) {
-    console.warn("Gemini API Key is missing. Please check your .env file or Vercel Environment Variables.");
+    console.error("Gemini API Key is missing. Please check your environment variables.");
     return null;
   }
   try {
-    return new GoogleGenerativeAI(apiKey);
+    return new GoogleGenAI({ apiKey });
   } catch (error) {
-    console.error("Failed to initialize GoogleGenerativeAI:", error);
+    console.error("Failed to initialize GoogleGenAI:", error);
     return null;
   }
 };
@@ -31,7 +37,7 @@ const fileToGenerativePart = async (file: File): Promise<string> => {
 
 export const generateSessionContent = async (topic: string, type: 'description' | 'quiz'): Promise<string> => {
   const ai = getAIClient();
-  if (!ai) return "AI Service Unavailable (Missing API Key)";
+  if (!ai) return "AI Service Unavailable (Missing or Invalid API Key)";
 
   let prompt = "";
   
@@ -42,17 +48,14 @@ export const generateSessionContent = async (topic: string, type: 'description' 
   }
 
   try {
-    // Updated to gemini-2.5-flash as per coding guidelines
-    const model = ai.getGenerativeModel({ model: 'gemini-2.5-flash' });
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    return response.text() || "No content generated.";
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+    });
+    return response.text || "No content generated.";
   } catch (error: any) {
     console.error("Gemini API Error:", error);
-    if (error.message?.includes('404')) {
-        return "Error: Model not found. Please ensure the API Key has access to Generative Language API.";
-    }
-    return "Failed to generate content. Please check your API key and try again.";
+    return "Failed to generate content. Please check your API key settings.";
   }
 };
 
@@ -64,19 +67,22 @@ export const extractStudentNamesFromImage = async (imageFile: File): Promise<str
   const prompt = "Extract the list of student names from this image. Return ONLY the names, one per line. Do not include numbers, grades, dates, or headers. Just the First and Last names.";
   
   try {
-    // Updated to gemini-2.5-flash as per coding guidelines
-    const model = ai.getGenerativeModel({ model: 'gemini-2.5-flash' });
-    const imagePart = {
-      inlineData: {
-        mimeType: imageFile.type,
-        data: base64Data
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              mimeType: imageFile.type,
+              data: base64Data
+            }
+          },
+          { text: prompt }
+        ]
       }
-    };
+    });
     
-    const result = await model.generateContent([imagePart, { text: prompt }]);
-    const response = await result.response;
-    const text = response.text() || "";
-    
+    const text = response.text || "";
     return text.split('\n').map(name => name.trim()).filter(name => name.length > 0);
   } catch (error: any) {
     console.error("Gemini Vision Error:", error);
@@ -90,36 +96,48 @@ export const extractGradesFromImage = async (imageFile: File): Promise<any[]> =>
 
   const base64Data = await fileToGenerativePart(imageFile);
   const prompt = `
-    Analyze this image of a grade sheet (handwritten or printed). 
-    Extract the student names and their scores for Term 1, Term 2, and Term 3 (if available).
-    
-    Return a STRICT JSON array of objects. Do not wrap in markdown code blocks.
-    Structure:
-    [
-      { "name": "Student Name", "note1": 15, "note2": 14, "note3": 0 }
-    ]
-    
-    Rules:
-    - If a note is missing, use 0.
-    - Extract as accurately as possible.
-    - Return ONLY the JSON.
+    Analyze this image of a grade sheet. 
+    Extract the student names and their scores for Term 1, Term 2, and Term 3.
+    If a note is missing, use 0.
+    Extract as accurately as possible.
   `;
 
   try {
-    const model = ai.getGenerativeModel({ model: 'gemini-2.5-flash' });
-    const imagePart = {
-      inlineData: {
-        mimeType: imageFile.type,
-        data: base64Data
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              mimeType: imageFile.type,
+              data: base64Data
+            }
+          },
+          { text: prompt }
+        ]
+      },
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              name: { type: Type.STRING },
+              note1: { type: Type.NUMBER },
+              note2: { type: Type.NUMBER },
+              note3: { type: Type.NUMBER }
+            }
+          }
+        }
       }
-    };
+    });
 
-    const result = await model.generateContent([imagePart, { text: prompt }]);
-    const response = await result.response;
-    let text = response.text();
+    let text = response.text;
+    if (!text) return [];
 
-    // Clean up markdown if present
-    text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    // Clean up any markdown formatting if present (e.g. ```json ... ```)
+    text = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
     
     return JSON.parse(text);
   } catch (error) {
